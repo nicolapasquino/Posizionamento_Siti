@@ -9,7 +9,7 @@ import streamlit as st
 
 import catasto_punti as cp
 
-VERSIONE = "1.0"
+VERSIONE = "1.2.0"
 
 st.set_page_config(page_title="Punti e Catasto", page_icon="🗺️", layout="wide")
 st.title("Punti su mappa e Catasto")
@@ -24,6 +24,8 @@ with st.sidebar:
     st.header("Informazioni")
     st.markdown(
         "- Le particelle compaiono sulla mappa da **zoom 17**, i numeri da **zoom 18**.\n"
+        "- Dal pannello dei layer si accendono anche i **fabbricati** (da zoom 17) e le **strade e acque** "
+        "(da zoom 14) del Catasto.\n"
         "- Il servizio non copre le province di Trento e Bolzano (catasto tavolare).\n"
         "- Le coordinate vengono inviate al servizio WMS dell'Agenzia delle Entrate.\n"
         f"- Massimo {cp.MAX_PUNTI} punti per file.\n\n"
@@ -86,7 +88,10 @@ if errori.any():
 
 # --- risultati ---
 st.subheader(f"Risultati ({len(risultato)} punti)")
-st.dataframe(risultato, hide_index=True, width="stretch")
+# prima le colonne principali: sullo smartphone si vedono senza scorrere la tabella di lato
+prime = [c for c in ("nome", "foglio", "particella", "note") if c in risultato.columns]
+st.dataframe(risultato, hide_index=True, width="stretch",
+             column_order=prime + [c for c in risultato.columns if c not in prime])
 
 html_mappa = cp.crea_mappa(risultato).get_root().render()
 if hasattr(st, "iframe"):

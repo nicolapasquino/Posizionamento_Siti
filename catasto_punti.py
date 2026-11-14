@@ -1,6 +1,7 @@
 """Funzioni comuni della web app: lettura dei punti, interrogazione del Catasto, mappa, esportazione.
 
-Stessa logica di mappa_punti_v1.1.ipynb.
+Stessa logica di mappa_punti_v1.4.ipynb: le funzioni sono copiate identiche nel notebook,
+quindi ogni modifica va riportata in entrambi (aggiornando le versioni).
 Dati catastali: © Agenzia delle Entrate – licenza CC BY 4.0.
 """
 from __future__ import annotations
@@ -46,10 +47,13 @@ def _leggi_csv(dati: bytes) -> pd.DataFrame:
     return pd.read_csv(io.StringIO(testo), sep=sep, dtype=str, skipinitialspace=True)
 
 
-def leggi_punti(dati: bytes, nome_file: str) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    """Legge un CSV (separatore ; , o tab) o un Excel. Restituisce (punti validi, righe scartate, avvisi)."""
+def leggi_punti(dati: bytes, nome_file: str, foglio_excel=0) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Legge un CSV (separatore ; , o tab) o un Excel. Restituisce (punti validi, righe scartate, avvisi).
+
+    `foglio_excel`: foglio di lavoro da leggere (indice o nome), solo per i file Excel.
+    """
     if nome_file.lower().endswith((".xlsx", ".xls")):
-        df = pd.read_excel(io.BytesIO(dati))
+        df = pd.read_excel(io.BytesIO(dati), sheet_name=foglio_excel)
     else:
         df = _leggi_csv(dati)
     df.columns = [str(c).strip().lower() for c in df.columns]
@@ -189,10 +193,58 @@ class CrsWms4258(MacroElement):
         self.layer = layer
 
 
-def _wms_catasto(nome, layers, opacity=1.0, min_zoom=0):
+class AdattamentiMobile(MacroElement):
+    """Rende la mappa comoda su smartphone e tablet; sul computer non cambia nulla.
+
+    1. Sui dispositivi touch, quando la mappa è incorporata in una pagina (web app, notebook),
+       un dito scorre la pagina e due dita spostano la mappa (plugin leaflet-gesture-handling,
+       messaggi già in italiano). A schermo intero, o nella mappa HTML aperta da sola, un dito
+       sposta la mappa come di consueto.
+    2. Sugli schermi stretti, se le attribuzioni vanno su più righe e coprirebbero la scala
+       grafica, la scala viene alzata sopra di esse.
+    """
+    _template = Template("""
+    {% macro header(this, kwargs) %}
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet-gesture-handling@1.2.2/dist/leaflet-gesture-handling.min.css"/>
+        <script src="https://cdn.jsdelivr.net/npm/leaflet-gesture-handling@1.2.2/dist/leaflet-gesture-handling.min.js"></script>
+    {% endmacro %}
+    {% macro script(this, kwargs) %}
+    (function () {
+        var mappa = {{ this._parent.get_name() }};
+        var touch = L.Browser.mobile || (window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+        var incorporata = window.self !== window.top;
+        function gesti(schermoIntero) {
+            if (!mappa.gestureHandling) { return; }
+            if (touch && incorporata && !schermoIntero) { mappa.gestureHandling.enable(); }
+            else { mappa.gestureHandling.disable(); }
+        }
+        gesti(false);
+        mappa.on("enterFullscreen", function () { gesti(true); });
+        mappa.on("exitFullscreen", function () { gesti(false); });
+
+        function sistemaScala() {
+            var att = mappa.attributionControl && mappa.attributionControl.getContainer();
+            var sx = mappa.getContainer().querySelector(".leaflet-bottom.leaflet-left");
+            if (!att || !sx) { return; }
+            sx.style.bottom = "";
+            var a = att.getBoundingClientRect(), s = sx.getBoundingClientRect();
+            if (a.left < s.right && a.top < s.bottom) { sx.style.bottom = a.height + "px"; }
+        }
+        mappa.whenReady(sistemaScala);
+        mappa.on("resize layeradd layerremove", function () { setTimeout(sistemaScala, 0); });
+    })();
+    {% endmacro %}
+    """)
+
+    def __init__(self):
+        super().__init__()
+        self._name = "AdattamentiMobile"
+
+
+def _wms_catasto(nome, layers, opacity=1.0, min_zoom=0, show=True):
     return folium.WmsTileLayer(
         url=WMS_URL, layers=layers, fmt="image/png", transparent=True, version="1.1.1",
-        name=nome, overlay=True, control=True, show=True, opacity=opacity,
+        name=nome, overlay=True, control=True, show=show, opacity=opacity,
         min_zoom=min_zoom, max_zoom=22, attr=ATTR_CATASTO)
 
 
@@ -206,7 +258,11 @@ def _testo(x) -> str:
 
 
 def crea_mappa(df: pd.DataFrame) -> folium.Map:
-    """Mappa OSM/satellite con fogli e particelle catastali (fogli da zoom 12, particelle da 17)."""
+    """Mappa OSM/satellite con fogli e particelle catastali (fogli da zoom 12, particelle da 17).
+
+    Fabbricati (da zoom 17) e strade e acque (da zoom 14) del Catasto sono disponibili
+    nel pannello dei layer, spenti all'apertura.
+    """
     m = folium.Map(location=[df["lat"].mean(), df["lon"].mean()], zoom_start=15,
                    tiles=None, control_scale=True, max_zoom=22)
     folium.TileLayer("OpenStreetMap", name="OpenStreetMap", max_zoom=22, max_native_zoom=19).add_to(m)
@@ -215,7 +271,9 @@ def crea_mappa(df: pd.DataFrame) -> folium.Map:
         attr="Esri World Imagery", name="Satellite (Esri)", max_zoom=22, max_native_zoom=19, show=False,
     ).add_to(m)
     for lyr in (_wms_catasto("Catasto – fogli", "CP.CadastralZoning", min_zoom=12),
-                _wms_catasto("Catasto – particelle", "CP.CadastralParcel,codice_plla", opacity=0.8, min_zoom=17)):
+                _wms_catasto("Catasto – particelle", "CP.CadastralParcel,codice_plla", opacity=0.8, min_zoom=17),
+                _wms_catasto("Catasto – fabbricati", "fabbricati", opacity=0.6, min_zoom=17, show=False),
+                _wms_catasto("Catasto – strade e acque", "strade,acque", opacity=0.6, min_zoom=14, show=False)):
         lyr.add_to(m)
         m.add_child(CrsWms4258(lyr))
 
@@ -243,6 +301,7 @@ def crea_mappa(df: pd.DataFrame) -> folium.Map:
     folium.LayerControl(collapsed=False).add_to(m)
     MeasureControl(primary_length_unit="meters", primary_area_unit="sqmeters").add_to(m)
     Fullscreen().add_to(m)
+    m.add_child(AdattamentiMobile())
     return m
 
 
