@@ -1,0 +1,24 @@
+# Servizio systemd per la web app "Punti e Catasto".
+# Copiare in /etc/systemd/system/catasto.service, poi:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now catasto
+[Unit]
+Description=Web app Punti e Catasto (Streamlit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=catasto
+Group=catasto
+# Streamlit legge .streamlit/config.toml dalla cartella di lavoro
+WorkingDirectory=/opt/catasto/app
+# Variante "sottocartella" (es. https://www.dipartimento.it/catasto/): aggiungere --server.baseUrlPath catasto
+ExecStart=/opt/catasto/venv/bin/streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true
+# Se il server esce su internet tramite un proxy dell'ateneo, togliere il commento e indicarlo:
+#Environment="HTTPS_PROXY=http://proxy.esempio.it:3128"
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
