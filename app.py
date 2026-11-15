@@ -3,15 +3,24 @@
 Avvio locale:   streamlit run app.py
 """
 import hashlib
+import re
 from pathlib import Path
 
 import streamlit as st
 
 import catasto_punti as cp
 
-VERSIONE = "1.2.0"
+VERSIONE = "1.3.0"
 
 st.set_page_config(page_title="Punti e Catasto", page_icon="🗺️", layout="wide")
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def particelle_nel_cerchio(lat, lon, raggio):
+    """Come cp.particelle_nel_cerchio, ma ricorda i risultati: cambiare altre opzioni non ripete il download."""
+    return cp.particelle_nel_cerchio(lat, lon, raggio)
+
+
 st.title("Punti su mappa e Catasto")
 st.markdown(
     "Carica un file **CSV** o **Excel** con le colonne **`nome`**, **`lat`**, **`lon`** "
@@ -26,6 +35,8 @@ with st.sidebar:
         "- Le particelle compaiono sulla mappa da **zoom 17**, i numeri da **zoom 18**.\n"
         "- Dal pannello dei layer si accendono anche i **fabbricati** (da zoom 17) e le **strade e acque** "
         "(da zoom 14) del Catasto.\n"
+        f"- Si può disegnare un cerchio intorno a uno dei punti e, con raggio fino a {cp.MAX_RAGGIO_PARTICELLE} m, "
+        "trovare ed esportare le particelle che vi cadono.\n"
         "- Il servizio non copre le province di Trento e Bolzano (catasto tavolare).\n"
         "- Le coordinate vengono inviate al servizio WMS dell'Agenzia delle Entrate.\n"
         f"- Massimo {cp.MAX_PUNTI} punti per file.\n\n"
@@ -93,20 +104,66 @@ prime = [c for c in ("nome", "foglio", "particella", "note") if c in risultato.c
 st.dataframe(risultato, hide_index=True, width="stretch",
              column_order=prime + [c for c in risultato.columns if c not in prime])
 
-html_mappa = cp.crea_mappa(risultato).get_root().render()
+base = Path(file.name).stem
+
+# --- cerchio intorno a uno dei punti ---
+cerchio = None
+st.subheader("Cerchio intorno a un punto")
+if st.toggle("Disegna sulla mappa un cerchio con centro in uno dei punti", key="cerchio_attivo"):
+    c1, c2 = st.columns([3, 1])
+    i = c1.selectbox("Centro del cerchio", risultato.index, format_func=lambda i: (
+        f"{risultato.at[i, 'nome']}  ({risultato.at[i, 'lat']:.5f}, {risultato.at[i, 'lon']:.5f})"))
+    raggio = c2.number_input("Raggio (m)", min_value=1, max_value=cp.MAX_RAGGIO_CERCHIO, value=100, step=10)
+    lat, lon, nome = float(risultato.at[i, "lat"]), float(risultato.at[i, "lon"]), str(risultato.at[i, "nome"])
+    cerchio = dict(lat=lat, lon=lon, raggio=raggio, nome=nome)
+    troppo_grande = raggio > cp.MAX_RAGGIO_PARTICELLE
+    includi = st.checkbox("Includi le particelle che cadono nel cerchio", disabled=troppo_grande,
+                          help=f"Disponibile fino a {cp.MAX_RAGGIO_PARTICELLE} m di raggio: le particelle "
+                               "vengono scaricate dal servizio WFS del Catasto.")
+    if troppo_grande:
+        st.caption(f"Le particelle si possono includere con un raggio fino a {cp.MAX_RAGGIO_PARTICELLE} m.")
+    elif includi:
+        try:
+            with st.spinner("Scarico le particelle dal Catasto…"):
+                tab_part, geo_part = particelle_nel_cerchio(lat, lon, raggio)
+        except Exception as e:  # servizio non raggiungibile o in errore
+            st.error(f"Non è stato possibile scaricare le particelle: {e}")
+        else:
+            cerchio["particelle"] = geo_part
+            intere = int((tab_part["interamente_dentro"] == "sì").sum())
+            st.markdown(f"**{len(tab_part)} particelle** cadono nel cerchio, {intere} per intero. "
+                        "Aree e distanze sono calcolate sulla mappa catastale: non sono le superfici catastali ufficiali.")
+            prime_p = ["particella", "foglio", "quota_nel_cerchio_pct", "area_nel_cerchio_m2", "area_m2",
+                       "interamente_dentro", "distanza_dal_centro_m"]
+            st.dataframe(tab_part, hide_index=True, width="stretch",
+                         column_order=prime_p + [c for c in tab_part.columns if c not in prime_p],
+                         column_config={"quota_nel_cerchio_pct": "% nel cerchio", "area_nel_cerchio_m2": "m² nel cerchio",
+                                        "area_m2": "area m²", "interamente_dentro": "per intero",
+                                        "distanza_dal_centro_m": "distanza dal centro (m)"})
+            if st.checkbox("Esporta l'elenco delle particelle"):
+                da_esportare = cp.particelle_da_esportare(tab_part, nome, lat, lon, raggio)
+                breve = re.sub(r"[^\w-]+", "_", nome).strip("_")[:40]
+                nome_file = f"{base}_particelle_{breve}_{raggio}m"
+                d1, d2 = st.columns(2)
+                d1.download_button("Scarica particelle (Excel)", cp.excel_bytes(da_esportare), f"{nome_file}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   width="stretch", on_click="ignore")
+                d2.download_button("Scarica particelle (CSV)", cp.csv_bytes(da_esportare), f"{nome_file}.csv",
+                                   mime="text/csv", width="stretch", on_click="ignore")
+
+html_mappa = cp.crea_mappa(risultato, cerchio).get_root().render()
 if hasattr(st, "iframe"):
     st.iframe(html_mappa, height=620)
 else:  # versioni di Streamlit precedenti a st.iframe
     import streamlit.components.v1 as components
     components.html(html_mappa, height=620)
 
-base = Path(file.name).stem
 c1, c2, c3 = st.columns(3)
 c1.download_button("Scarica Excel", cp.excel_bytes(risultato), f"{base}_con_catasto.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                   width="stretch")
+                   width="stretch", on_click="ignore")
 c2.download_button("Scarica CSV", cp.csv_bytes(risultato), f"{base}_con_catasto.csv",
-                   mime="text/csv", width="stretch")
+                   mime="text/csv", width="stretch", on_click="ignore")
 c3.download_button("Scarica mappa (HTML)", html_mappa.encode("utf-8"), f"{base}_mappa.html",
-                   mime="text/html", width="stretch")
+                   mime="text/html", width="stretch", on_click="ignore")
 st.caption("La mappa HTML si apre con qualsiasi browser, senza installare nulla.")

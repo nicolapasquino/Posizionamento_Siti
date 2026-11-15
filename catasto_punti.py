@@ -1,6 +1,6 @@
 """Funzioni comuni della web app: lettura dei punti, interrogazione del Catasto, mappa, esportazione.
 
-Stessa logica di mappa_punti_v1.4.ipynb: le funzioni sono copiate identiche nel notebook,
+Stessa logica di mappa_punti_v1.5.ipynb: le funzioni sono copiate identiche nel notebook,
 quindi ogni modifica va riportata in entrambi (aggiornando le versioni).
 Dati catastali: © Agenzia delle Entrate – licenza CC BY 4.0.
 """
@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import html
 import io
+import math
 import re
 import time
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 
 import folium
@@ -17,11 +19,15 @@ import pandas as pd
 import requests
 from branca.element import MacroElement, Template
 from folium.plugins import Fullscreen, MeasureControl
+from shapely.geometry import MultiPolygon, Point, Polygon
 
 WMS_URL = "https://wms.cartografia.agenziaentrate.gov.it/inspire/wms/ows01.php"
 ATTR_CATASTO = "Cartografia catastale © Agenzia delle Entrate (CC BY 4.0)"
 MAX_PUNTI = 1000          # limite per file, per non sovraccaricare il servizio pubblico
 PARALLELI = 4             # richieste contemporanee al Catasto
+WFS_URL = "https://wfs.cartografia.agenziaentrate.gov.it/inspire/wfs/owfs01.php"
+MAX_RAGGIO_CERCHIO = 50000     # metri: raggio massimo del cerchio sulla mappa
+MAX_RAGGIO_PARTICELLE = 500    # metri: oltre, troppe particelle da scaricare e disegnare
 
 # nomi di colonna accettati (dopo minuscole e rimozione spazi)
 ALIAS = {
@@ -168,6 +174,122 @@ def arricchisci(df: pd.DataFrame, righe=None, avanzamento=None) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Cerchio intorno a un punto: particelle che vi cadono (servizio WFS del Catasto)
+# ---------------------------------------------------------------------------
+_CRS_WFS = "urn:ogc:def:crs:EPSG::6706"     # RDN2008 (ETRF2000), ordine assi lat,lon
+_GML = "{http://www.opengis.net/gml/3.2}"
+_CP = "{http://mapserver.gis.umn.edu/mapserver}"
+_NON_PARTICELLE = re.compile(r"^(STRADA|ACQUA)", re.IGNORECASE)   # strade e acque non sono particelle
+COLONNE_PARTICELLE = ["comune_belfiore", "foglio", "allegato", "sviluppo", "particella", "rif_catastale",
+                      "area_m2", "area_nel_cerchio_m2", "quota_nel_cerchio_pct", "interamente_dentro",
+                      "distanza_dal_centro_m"]
+
+
+def _piano_locale(lat0, lon0):
+    """Coordinate piane in metri (x verso est, y verso nord) con origine in (lat0, lon0).
+
+    Usa i raggi di curvatura dell'ellissoide GRS80 nell'origine: entro 1 km l'errore
+    resta sotto 0,2 m, molto meno dell'accuratezza della cartografia catastale.
+    """
+    a, e2 = 6378137.0, 0.00669438002290
+    s = math.sin(math.radians(lat0))
+    w = math.sqrt(1 - e2 * s * s)
+    kx = math.radians(1) * a / w * math.cos(math.radians(lat0))   # metri per grado di longitudine
+    ky = math.radians(1) * a * (1 - e2) / w ** 3                   # metri per grado di latitudine
+    return kx, ky
+
+
+def _wfs_particelle(lat, lon, raggio_m, pagina=5000, tentativi=10):
+    """Particelle nel quadrato circoscritto al cerchio: lista di (riferimento, etichetta, poligoni).
+
+    Ogni poligono è una lista di anelli (esterno e buchi) di coppie (lat, lon). Scarica a pagine
+    e, come per il WMS, riconosce le risposte di errore del server e riprova.
+    """
+    kx, ky = _piano_locale(lat, lon)
+    dlat, dlon = 1.02 * raggio_m / ky, 1.02 * raggio_m / kx
+    trovate, inizio = {}, 0
+    while True:
+        params = dict(SERVICE="WFS", VERSION="2.0.0", REQUEST="GetFeature", TYPENAMES="CP:CadastralParcel",
+                      SRSNAME=_CRS_WFS, COUNT=pagina, STARTINDEX=inizio,
+                      BBOX=f"{lat-dlat},{lon-dlon},{lat+dlat},{lon+dlon},{_CRS_WFS}")
+        for _ in range(tentativi):
+            r = requests.get(WFS_URL, params=params, timeout=120)
+            r.raise_for_status()
+            if "ExceptionReport" not in r.text[:2000]:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError(f"il servizio WFS del Catasto ha risposto con errore a tutti i {tentativi} tentativi")
+        radice = ET.fromstring(r.content)
+        totale = radice.get("numberMatched", "unknown")   # "unknown" quando il server non lo calcola
+        membri = 0
+        for p in radice.iter(f"{_CP}CadastralParcel"):
+            membri += 1
+            poligoni = []
+            for poly in p.iter(f"{_GML}Polygon"):
+                anelli = []
+                for pos in poly.iter(f"{_GML}posList"):
+                    v = [float(x) for x in pos.text.split()]
+                    anelli.append(list(zip(v[0::2], v[1::2])))
+                poligoni.append(anelli)
+            rif = p.findtext(f"{_CP}NATIONALCADASTRALREFERENCE")
+            trovate[rif] = (rif, p.findtext(f"{_CP}LABEL"), poligoni)
+        inizio += membri
+        if membri == 0 or (totale.isdigit() and inizio >= int(totale)):
+            return list(trovate.values())
+
+
+def particelle_nel_cerchio(lat, lon, raggio_m):
+    """Particelle catastali che cadono, anche solo in parte, nel cerchio di centro (lat, lon).
+
+    Restituisce (tabella, geojson): la tabella ha una riga per particella con aree e distanze
+    calcolate sulla geometria della mappa catastale (non sono le superfici catastali ufficiali);
+    il GeoJSON serve per disegnarle sulla mappa. Strade e acque sono escluse.
+    """
+    if raggio_m > MAX_RAGGIO_PARTICELLE:
+        raise ValueError(f"raggio troppo grande per cercare le particelle (massimo {MAX_RAGGIO_PARTICELLE} m)")
+    kx, ky = _piano_locale(lat, lon)
+
+    def piano(anello):
+        return [((lo - lon) * kx, (la - lat) * ky) for la, lo in anello]
+
+    centro = Point(0, 0)
+    cerchio = centro.buffer(raggio_m, 64)
+    righe, feats = [], []
+    for rif, etichetta, poligoni in _wfs_particelle(lat, lon, raggio_m):
+        if not poligoni or _NON_PARTICELLE.match(etichetta or ""):
+            continue
+        geom = MultiPolygon([Polygon(piano(p[0]), [piano(b) for b in p[1:]]) for p in poligoni])
+        if not geom.is_valid:
+            geom = geom.buffer(0)
+        if geom.is_empty or not geom.intersects(cerchio):
+            continue
+        area, dentro = geom.area, geom.intersection(cerchio).area
+        riga = dict(comune_belfiore=None, foglio=None, allegato=None, sviluppo=None, particella=etichetta,
+                    rif_catastale=rif, area_m2=round(area, 1), area_nel_cerchio_m2=round(dentro, 1),
+                    quota_nel_cerchio_pct=round(100 * dentro / area, 1) if area else None,
+                    interamente_dentro="sì" if cerchio.contains(geom) else "no",
+                    distanza_dal_centro_m=round(geom.distance(centro), 1))
+        m = _RIF.match(rif or "")
+        if m:
+            riga.update(comune_belfiore=m["comune"], foglio=int(m["foglio"]),
+                        allegato=m["allegato"], sviluppo=m["sviluppo"])
+        righe.append(riga)
+        feats.append({"type": "Feature",
+                      "geometry": {"type": "MultiPolygon",
+                                   "coordinates": [[[[lo, la] for la, lo in anello] for anello in p] for p in poligoni]},
+                      "properties": {"particella": etichetta, "foglio": riga["foglio"], "rif_catastale": rif,
+                                     "quota_nel_cerchio_pct": riga["quota_nel_cerchio_pct"],
+                                     "interamente_dentro": riga["interamente_dentro"]}})
+    tabella = pd.DataFrame(righe, columns=COLONNE_PARTICELLE)
+    if len(tabella):
+        ordine = pd.to_numeric(tabella["particella"], errors="coerce")
+        tabella = (tabella.assign(_n=ordine).sort_values(["foglio", "_n", "particella"], na_position="last")
+                   .drop(columns="_n").reset_index(drop=True))
+    return tabella, {"type": "FeatureCollection", "features": feats}
+
+
+# ---------------------------------------------------------------------------
 # Mappa
 # ---------------------------------------------------------------------------
 class CrsWms4258(MacroElement):
@@ -257,11 +379,49 @@ def _testo(x) -> str:
     return str(x)
 
 
-def crea_mappa(df: pd.DataFrame) -> folium.Map:
+def _numero(x, decimali=0) -> str:
+    """Numero all'italiana: 31415.9 -> '31.416', con decimali la virgola."""
+    return f"{x:,.{decimali}f}".replace(",", "§").replace(".", ",").replace("§", ".")
+
+
+def _aggiungi_cerchio(m, cerchio):
+    """Disegna il cerchio e, se presenti, le particelle che vi cadono (sopra il cerchio, così
+    restano cliccabili). `cerchio`: dict con lat, lon, raggio (m), nome e, facoltativo, particelle
+    (GeoJSON di particelle_nel_cerchio)."""
+    lat, lon, raggio = cerchio["lat"], cerchio["lon"], cerchio["raggio"]
+    area = math.pi * raggio ** 2
+    righe = [f"Cerchio di <b>{_numero(raggio, 0 if float(raggio).is_integer() else 1)} m</b> "
+             f"intorno a <b>{html.escape(str(cerchio['nome']))}</b>",
+             f"centro: lat {lat:.6f}, lon {lon:.6f}",
+             f"area: {_numero(area)} m² ({_numero(area / 1e4, 2)} ha)"]
+    particelle = cerchio.get("particelle")
+    if particelle is not None:
+        feats = particelle["features"]
+        intere = sum(1 for f in feats if f["properties"]["interamente_dentro"] == "sì")
+        righe.append(f"{len(feats)} particelle nel cerchio, {intere} per intero")
+    gruppo = folium.FeatureGroup(name=f"Cerchio di {_numero(raggio)} m").add_to(m)
+    folium.Circle([lat, lon], radius=raggio, color="#1f6feb", weight=2.5, fill=True, fill_opacity=0.08,
+                  popup=folium.Popup("<br>".join(righe), max_width=320)).add_to(gruppo)
+    folium.CircleMarker([lat, lon], radius=3, color="#1f6feb", fill=True, fill_opacity=1).add_to(gruppo)
+    if particelle is not None and particelle["features"]:
+        folium.GeoJson(
+            particelle, name="Particelle nel cerchio",
+            style_function=lambda f: {"color": "#b03a2e", "weight": 1.2, "fillColor": "#e74c3c",
+                                      "fillOpacity": 0.4 if f["properties"]["interamente_dentro"] == "sì" else 0.15},
+            highlight_function=lambda f: {"weight": 3, "fillOpacity": 0.6},
+            tooltip=folium.GeoJsonTooltip(["particella", "foglio", "quota_nel_cerchio_pct"],
+                                          aliases=["Particella", "Foglio", "% nel cerchio"]),
+        ).add_to(m)
+    kx, ky = _piano_locale(lat, lon)
+    m.fit_bounds([[lat - raggio / ky, lon - raggio / kx], [lat + raggio / ky, lon + raggio / kx]], padding=(20, 20))
+
+
+def crea_mappa(df: pd.DataFrame, cerchio=None) -> folium.Map:
     """Mappa OSM/satellite con fogli e particelle catastali (fogli da zoom 12, particelle da 17).
 
     Fabbricati (da zoom 17) e strade e acque (da zoom 14) del Catasto sono disponibili
-    nel pannello dei layer, spenti all'apertura.
+    nel pannello dei layer, spenti all'apertura. Con `cerchio` (vedi _aggiungi_cerchio) disegna
+    anche il cerchio intorno a un punto e la mappa si centra su di esso.
     """
     m = folium.Map(location=[df["lat"].mean(), df["lon"].mean()], zoom_start=15,
                    tiles=None, control_scale=True, max_zoom=22)
@@ -296,7 +456,9 @@ def crea_mappa(df: pd.DataFrame) -> folium.Map:
             icon=folium.Icon(color="red", icon="map-marker", prefix="fa"),
         ).add_to(punti)
 
-    if len(df) > 1:
+    if cerchio:
+        _aggiungi_cerchio(m, cerchio)
+    elif len(df) > 1:
         m.fit_bounds([[df["lat"].min(), df["lon"].min()], [df["lat"].max(), df["lon"].max()]], padding=(30, 30))
     folium.LayerControl(collapsed=False).add_to(m)
     MeasureControl(primary_length_unit="meters", primary_area_unit="sqmeters").add_to(m)
@@ -319,6 +481,15 @@ def excel_bytes(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     _per_esportare(df).to_excel(buf, index=False)
     return buf.getvalue()
+
+
+def particelle_da_esportare(tabella: pd.DataFrame, nome, lat, lon, raggio_m) -> pd.DataFrame:
+    """Tabella delle particelle nel cerchio con, in testa, centro e raggio del cerchio."""
+    out = tabella.copy()
+    for i, (colonna, valore) in enumerate((("centro", nome), ("lat_centro", lat), ("lon_centro", lon),
+                                           ("raggio_m", raggio_m))):
+        out.insert(i, colonna, valore)
+    return out
 
 
 def csv_bytes(df: pd.DataFrame) -> bytes:

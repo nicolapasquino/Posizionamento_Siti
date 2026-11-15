@@ -1,8 +1,8 @@
-# Punti su mappa e Catasto – web app (versione 1.2.0)
+# Punti su mappa e Catasto – web app (versione 1.3.0)
 
 Web app che riceve un file **CSV o Excel** con le colonne `nome`, `lat`, `lon` (gradi decimali, WGS84), mostra i punti su una mappa OpenStreetMap con i fogli e le particelle catastali e, per ogni punto, ricava **comune (codice Belfiore), foglio e particella**. I risultati si scaricano come Excel, CSV o mappa HTML.
 
-Usa la stessa logica di `mappa_punti_v1.4.ipynb`. Chi la usa ha bisogno solo di un browser.
+Usa la stessa logica di `mappa_punti_v1.5.ipynb`. Chi la usa ha bisogno solo di un browser.
 
 ## Contenuto
 
@@ -51,23 +51,26 @@ Le istruzioni passo passo sono in **`GUIDA_PUBBLICAZIONE.md`**, per due modalit�
 
 - **Excel** e **CSV** (separatore `;`, virgola decimale, per Excel in italiano) con le colonne aggiunte `comune_belfiore`, `foglio`, `allegato`, `sviluppo`, `particella`, `rif_catastale`, `note`.
 - **Mappa HTML** interattiva: si apre con qualsiasi browser, senza installare nulla.
+- **Particelle nel cerchio** (facoltativo): Excel e CSV con, per ogni particella, area, area nel cerchio, percentuale nel cerchio, se è interamente dentro e distanza dal centro; in testa centro e raggio del cerchio.
 
 Nella mappa i fogli compaiono da zoom 12, le particelle da zoom 17 e i numeri di particella da zoom 18. Dal pannello dei layer si possono accendere anche i fabbricati (da zoom 17) e le strade e acque (da zoom 14) del Catasto, spenti all'apertura.
 
 ## Cose da sapere
 
+- **Cerchio intorno a un punto**: sotto i risultati si sceglie uno dei punti come centro e il raggio in metri (fino a 50 km). Con raggio fino a 500 m si possono includere le particelle che cadono nel cerchio, scaricate dal servizio WFS del Catasto (strade e acque escluse), ed esportarne l'elenco. Aree e distanze sono calcolate sulla mappa catastale e non sono le superfici catastali ufficiali.
 - **Errori del server catastale**: circa metà delle connessioni riceve sempre un errore. L'app lo riconosce e riprova fino a 10 volte per richiesta. Se un punto resta in errore, compare il pulsante **Riprova questi punti**.
 - **Tempi**: nelle prove, 6 punti hanno richiesto 12–25 secondi (4 richieste in parallelo).
 - **Precisione**: il risultato dipende dalla precisione delle coordinate (con 4 decimali circa ±5 m) e dalla cartografia catastale. È indicativo e non sostituisce una visura.
 - **Smartphone e tablet**: la pagina si adatta allo schermo. Sulla mappa un dito scorre la pagina e due dita spostano la mappa; a schermo intero un dito sposta la mappa. Nella tabella nome, foglio e particella sono le prime colonne.
 - **Riservatezza**: le coordinate vengono inviate al servizio dell'Agenzia delle Entrate e passano per il server che ospita l'app.
-- **Codice condiviso con il notebook**: le funzioni di `catasto_punti.py` sono copiate identiche in `mappa_punti_v1.4.ipynb`. Ogni modifica va riportata in entrambi, aggiornando le versioni.
+- **Codice condiviso con il notebook**: le funzioni di `catasto_punti.py` sono copiate identiche in `mappa_punti_v1.5.ipynb`. Ogni modifica va riportata in entrambi, aggiornando le versioni.
 - Il servizio non copre le province di Trento e Bolzano (catasto tavolare).
 
 Dati catastali: © Agenzia delle Entrate – licenza CC BY 4.0.
 
 ## Storico revisioni
 
+- **1.3.0** – Cerchio intorno a un punto: centro scelto tra i punti del file, raggio in metri, particelle che cadono nel cerchio (facoltative, raggio fino a 500 m) ed esportazione del loro elenco (facoltativa). Nuova libreria richiesta: `shapely`. Corretto un difetto dei pulsanti di download, che ricaricavano la pagina e a volte facevano perdere il nome della mappa HTML scaricata. Allineata al notebook 1.5.
 - **1.2.0** – Nel pannello dei layer anche i fabbricati (da zoom 17) e le strade e acque (da zoom 14) del Catasto, spenti all'apertura e semitrasparenti. Allineata al notebook 1.4.
 - **1.1.0** – Uso da smartphone e tablet: un dito scorre la pagina e due dita spostano la mappa (a schermo intero un dito sposta la mappa), la scala grafica non viene più coperta dalle attribuzioni, nella tabella nome, foglio e particella sono le prime colonne. Sul computer la mappa non cambia. Allineata al notebook 1.3.
 - **1.0.2** – `leggi_punti` accetta il parametro facoltativo `foglio_excel`, per avere funzioni identiche al notebook 1.2. Nessun cambiamento visibile nell'app.

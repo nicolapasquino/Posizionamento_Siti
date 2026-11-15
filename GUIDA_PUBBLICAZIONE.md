@@ -1,6 +1,6 @@
 # Guida alla pubblicazione della web app "Punti e Catasto"
 
-Versione 1.2.0 – 14/11/2026
+Versione 1.3.0 – 15/11/2026
 
 Questa guida spiega come mettere online la web app in due modi:
 
@@ -27,7 +27,7 @@ In entrambi i casi le coordinate dei punti vengono inviate anche al servizio WMS
 
 ## Contenuto del pacchetto
 
-Il file `mappa_punti_webapp_v1.2.0.zip` contiene la cartella `mappa_punti_webapp`:
+Il file `mappa_punti_webapp_v1.3.0.zip` contiene la cartella `mappa_punti_webapp`:
 
 | file | serve per |
 |---|---|
@@ -122,7 +122,7 @@ Streamlit ascolta solo sulla macchina stessa (`127.0.0.1`). Dall'esterno si ragg
   - **variante A**: un nome dedicato, per esempio `catasto.dipartimento.unina.it`;
   - **variante B**: una sottocartella di un sito esistente, per esempio `https://www.dipartimento.unina.it/catasto/`.
 - [ ] Un certificato HTTPS per quel nome: quello dell'ateneo, oppure Let's Encrypt se la macchina è raggiungibile da internet.
-- [ ] Il permesso di uscire su internet verso `wms.cartografia.agenziaentrate.gov.it` (porta 443). Durante l'installazione serve anche l'accesso a `pypi.org` e `files.pythonhosted.org`. Se l'uscita passa per un **proxy dell'ateneo**, fatti dare l'indirizzo.
+- [ ] Il permesso di uscire su internet verso `wms.cartografia.agenziaentrate.gov.it` e `wfs.cartografia.agenziaentrate.gov.it` (porta 443): il secondo serve per le particelle nel cerchio. Durante l'installazione serve anche l'accesso a `pypi.org` e `files.pythonhosted.org`. Se l'uscita passa per un **proxy dell'ateneo**, fatti dare l'indirizzo.
 - [ ] Firewall: in ingresso solo le porte 80 e 443. La porta 8501 **non** va aperta.
 - [ ] Chi potrà usare l'app: solo la rete interna o la VPN dell'ateneo, oppure tutti.
 
@@ -146,13 +146,13 @@ sudo adduser --system --group --home /opt/catasto catasto
 **3. Copia dei file.** Dal tuo computer copia lo zip sul server:
 
 ```bash
-scp mappa_punti_webapp_v1.2.0.zip utente@server:/tmp/
+scp mappa_punti_webapp_v1.3.0.zip utente@server:/tmp/
 ```
 
 Poi, sul server:
 
 ```bash
-cd /tmp && unzip -o mappa_punti_webapp_v1.2.0.zip
+cd /tmp && unzip -o mappa_punti_webapp_v1.3.0.zip
 sudo mkdir -p /opt/catasto/app
 sudo cp -r /tmp/mappa_punti_webapp/. /opt/catasto/app/
 sudo chown -R catasto:catasto /opt/catasto
@@ -316,6 +316,7 @@ Se avevi modificato `/etc/systemd/system/catasto.service` o la configurazione de
 | Pagina bianca o *404* nella variante B | sottocartella diversa tra server web e Streamlit | il nome dopo `--server.baseUrlPath` deve coincidere con quello di `location`/`ProxyPass` (qui `catasto`) |
 | Il caricamento del file fallisce con errore *413* | file più grande del limite del server web | `client_max_body_size` in nginx (nel modello è già 10 MB, come in `config.toml`) |
 | Tutti i punti hanno la nota *errore: …* | il server non raggiunge il servizio dell'Agenzia | dal server: `curl -sI "https://wms.cartografia.agenziaentrate.gov.it/inspire/wms/ows01.php?SERVICE=WMS&REQUEST=GetCapabilities"`; se serve un proxy, impostalo nel servizio (B.4) |
+| Il cerchio funziona, ma includendo le particelle compare *Non è stato possibile scaricare le particelle* | il server non raggiunge il servizio WFS dell'Agenzia | dal server: `curl -sI "https://wfs.cartografia.agenziaentrate.gov.it/inspire/wfs/owfs01.php?SERVICE=WFS&REQUEST=GetCapabilities"`; chiedi al servizio informatico di aprire l'uscita verso questo indirizzo |
 | Nei log compare *CERTIFICATE_VERIFY_FAILED* | il proxy dell'ateneo ispeziona il traffico HTTPS | chiedi al servizio informatico il certificato del proxy e aggiungi nel servizio `Environment="REQUESTS_CA_BUNDLE=/percorso/certificato.pem"` |
 | Alcuni punti hanno la nota *errore: …* | errori temporanei del servizio dell'Agenzia | pulsante **Riprova questi punti** nell'app |
 
@@ -323,7 +324,7 @@ Se avevi modificato `/etc/systemd/system/catasto.service` o la configurazione de
 
 # Verifica finale (entrambe le modalità)
 
-1. Apri l'indirizzo dell'app: compare la pagina **Punti su mappa e Catasto**. Nella barra laterale si legge **Versione 1.2.0**.
+1. Apri l'indirizzo dell'app: compare la pagina **Punti su mappa e Catasto**. Nella barra laterale si legge **Versione 1.3.0**.
 2. Carica il file `punti_esempio.csv` del pacchetto e fai clic su **Elabora**.
 3. Entro circa mezzo minuto compare la tabella **Risultati (6 punti)**. Per esempio, *Villa delle Ginestre* deve risultare **foglio 3, particella 325** (riferimento `L259_000300.325`).
 4. Nella mappa ingrandisci fino a vedere le particelle (da zoom 17) e i loro numeri (da zoom 18).
